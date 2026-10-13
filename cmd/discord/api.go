@@ -17,7 +17,6 @@ import (
 
 const (
 	apiBase         = "https://discord.com/api/v10"
-	userAgent       = "DiscordBot (https://github.com/afadil/discord-cli, 0.1.0)"
 	keychainService = "discord-cli"
 	keychainAccount = "bot-token"
 )
@@ -27,6 +26,11 @@ const (
 var cdnHosts = map[string]bool{
 	"cdn.discordapp.com":   true,
 	"media.discordapp.net": true,
+}
+
+// Discord asks bots to identify themselves with this User-Agent format.
+func userAgent() string {
+	return "DiscordBot (https://github.com/afadil/discord-cli, " + currentVersion() + ")"
 }
 
 type client struct {
@@ -106,7 +110,7 @@ func (c *client) call(method, path string, query url.Values, body any) ([]byte, 
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bot "+c.token)
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", userAgent())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -172,7 +176,7 @@ func (c *client) download(rawURL, dest string, maxBytes int64) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", userAgent())
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

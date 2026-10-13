@@ -196,7 +196,7 @@ func TestReadPrintsMessagesOldestFirst(t *testing.T) {
 		}
 	}
 	reqs := f.requestsTo("/api/v10/channels/111/messages")
-	if len(reqs) != 1 || reqs[0].Auth != "Bot "+testToken || reqs[0].UserAgent != userAgent {
+	if len(reqs) != 1 || reqs[0].Auth != "Bot "+testToken || reqs[0].UserAgent != userAgent() {
 		t.Fatalf("unexpected message requests: %+v", reqs)
 	}
 	if len(f.requestsTo("/cdn/a.png")) != 0 {
@@ -402,6 +402,22 @@ func TestReadPagesForwardFromAfter(t *testing.T) {
 	}
 	if !strings.Contains(out, "150 messages") || strings.Index(out, "msg 100001") > strings.Index(out, "msg 100150") {
 		t.Errorf("forward pages not merged oldest first:\n%s", out[:300])
+	}
+}
+
+func TestVersionNeedsNoToken(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "")
+	old := version
+	version = "v9.9.9"
+	t.Cleanup(func() { version = old })
+	for _, arg := range []string{"version", "--version"} {
+		code, out, errOut := runCLI(nil, "", arg)
+		if code != 0 || out != "discord v9.9.9\n" || errOut != "" {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q", arg, code, out, errOut)
+		}
+	}
+	if !strings.Contains(userAgent(), "v9.9.9") {
+		t.Errorf("User-Agent %q does not carry the version", userAgent())
 	}
 }
 

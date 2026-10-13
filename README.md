@@ -17,7 +17,7 @@ promise of a response or a fix.
 
 ## Requirements
 
-- Go 1.22 or later.
+- Go 1.22 or later, only to build from source.
 - macOS for Keychain token storage. Elsewhere, set `DISCORD_TOKEN` instead.
 - A Discord bot added to your server, with:
   - **Message Content Intent** enabled (Developer Portal → your app → Bot).
@@ -27,18 +27,39 @@ promise of a response or a fix.
 
 ## Install
 
+Download the archive for your platform from the
+[releases page](https://github.com/afadil/discord-cli/releases), check it
+against `checksums.txt`, and put `discord` somewhere on your `PATH`, such as
+`~/.local/bin`. On macOS, as an example for Apple Silicon:
+
+```bash
+tar -xzf discord_*_darwin_arm64.tar.gz
+mv discord_*_darwin_arm64/discord ~/.local/bin/
+```
+
+The macOS binaries are not signed. If you downloaded the archive in a browser,
+macOS blocks the binary until you clear the quarantine flag:
+
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/discord
+```
+
+With Go 1.22 or later installed, you can instead run:
+
 ```bash
 go install github.com/afadil/discord-cli/cmd/discord@latest
 ```
 
 This puts `discord` in `$(go env GOPATH)/bin`, which must be on your `PATH`.
-To build from a checkout instead:
+To build from a checkout:
 
 ```bash
 git clone https://github.com/afadil/discord-cli.git
 cd discord-cli
 go build -trimpath -ldflags='-s -w' -o ~/.local/bin/discord ./cmd/discord
 ```
+
+`discord version` prints the installed version.
 
 ## Bot token
 
@@ -147,6 +168,20 @@ go test ./...
 ```
 
 Tests run against a local fake Discord server and need no token.
+
+## Release
+
+Push a version tag. The Release workflow tests the code, builds macOS, Linux
+and Windows archives for x86-64 and ARM, and publishes them with
+`checksums.txt` as a GitHub release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Running the workflow by hand (Actions → Release → Run workflow) builds the same
+archives as a workflow artifact without publishing anything.
 
 ## License
 

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,8 @@ Usage:
                                                   post TEXT, or stdin when TEXT is
                                                   omitted; never pings anyone
 
+  discord version                                 print the version
+
 Flags:
   --json        print the raw Discord JSON instead of text
   --download    save attachments to a new temp folder and print their paths
@@ -48,6 +51,21 @@ The bot token is read from the Keychain (service "discord-cli", account
 "bot-token"), falling back to DISCORD_TOKEN. Store it with:
   ` + keychainAddCommand + `
 `
+
+// version is set by release builds with -ldflags "-X main.version=v1.2.3".
+var version string
+
+// currentVersion falls back to the module version that `go install
+// ...@v1.2.3` records, then to "dev" for local builds.
+func currentVersion() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, nil))
@@ -58,6 +76,10 @@ func main() {
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, c *client) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		fmt.Fprint(stdout, usage)
+		return 0
+	}
+	if args[0] == "version" || args[0] == "--version" {
+		fmt.Fprintln(stdout, "discord", currentVersion())
 		return 0
 	}
 	cmd, rest := args[0], args[1:]

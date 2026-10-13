@@ -47,8 +47,8 @@ Flags:
   --json        print the raw Discord JSON instead of text
   --download    save attachments to a new temp folder and print their paths
 
-The bot token is read from the Keychain (service "discord-cli", account
-"bot-token"), falling back to DISCORD_TOKEN. Store it with:
+The bot token comes from DISCORD_TOKEN, or on macOS from the Keychain first
+(service "discord-cli", account "bot-token"). Store it there with:
   ` + keychainAddCommand + `
 `
 

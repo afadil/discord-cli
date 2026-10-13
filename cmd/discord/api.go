@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -49,22 +50,36 @@ func newClient(token string) *client {
 	}
 }
 
-// loadToken prefers the Keychain so a stale DISCORD_TOKEN exported by a shell
-// profile cannot shadow the current token.
+// loadToken prefers the macOS Keychain so a stale DISCORD_TOKEN exported by a
+// shell profile cannot shadow the current token. Other systems use the
+// environment variable only.
 func loadToken() (string, error) {
-	out, err := exec.Command("/usr/bin/security", "find-generic-password",
-		"-s", keychainService, "-a", keychainAccount, "-w").Output()
-	if err == nil {
-		if t := strings.TrimSpace(string(out)); t != "" {
-			return t, nil
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("/usr/bin/security", "find-generic-password",
+			"-s", keychainService, "-a", keychainAccount, "-w").Output()
+		if err == nil {
+			if t := strings.TrimSpace(string(out)); t != "" {
+				return t, nil
+			}
 		}
 	}
 	if t := strings.TrimSpace(os.Getenv("DISCORD_TOKEN")); t != "" {
 		return t, nil
 	}
+	if runtime.GOOS != "darwin" {
+		return "", errors.New("no bot token found: set DISCORD_TOKEN to the bot token")
+	}
 	return "", errors.New("no bot token found. Either the Keychain has no \"" + keychainService + "\" entry, " +
 		"or this command runs in a sandbox that blocks the Keychain and network (in Codex, run it outside the sandbox). " +
 		"To store the token:\n  " + keychainAddCommand)
+}
+
+// newTokenHint says where a replacement token goes on this system.
+func newTokenHint() string {
+	if runtime.GOOS == "darwin" {
+		return "store the new one:\n  " + keychainAddCommand
+	}
+	return "set DISCORD_TOKEN to the new one"
 }
 
 const keychainAddCommand = "security add-generic-password -U -s " + keychainService + " -a " + keychainAccount + " -w"
@@ -79,7 +94,7 @@ type apiError struct {
 func (e *apiError) Error() string {
 	switch e.Status {
 	case http.StatusUnauthorized:
-		return "Discord rejected the bot token (401). If it was reset, store the new one:\n  " + keychainAddCommand
+		return "Discord rejected the bot token (401). If it was reset, " + newTokenHint()
 	case http.StatusForbidden:
 		return fmt.Sprintf("missing access (403, code %d): %s. The bot can't see or post in this channel.", e.Code, e.Message)
 	case http.StatusNotFound:

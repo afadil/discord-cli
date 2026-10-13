@@ -457,7 +457,7 @@ func TestJSONWithDownloadIsRejected(t *testing.T) {
 func TestUnauthorizedExplainsTokenReset(t *testing.T) {
 	_, c := newFakeDiscord(t)
 	code, _, errOut := runCLI(c, "", "read", "401")
-	if code != 1 || !strings.Contains(errOut, keychainAddCommand) {
+	if code != 1 || !strings.Contains(errOut, newTokenHint()) {
 		t.Fatalf("exit %d, stderr %q", code, errOut)
 	}
 	if strings.Contains(errOut, testToken) {

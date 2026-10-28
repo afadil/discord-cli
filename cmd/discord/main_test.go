@@ -19,9 +19,9 @@ import (
 const testToken = "test-token-value"
 
 type recorded struct {
-	Method, Path, Auth, UserAgent string
-	Query                         url.Values
-	Body                          []byte
+	Method, Path, Auth, UserAgent, AuditReason string
+	Query                                      url.Values
+	Body                                       []byte
 }
 
 type fakeDiscord struct {
@@ -33,11 +33,13 @@ type fakeDiscord struct {
 
 func (f *fakeDiscord) record(r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body)) // handlers can still read it
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, recorded{
 		Method: r.Method, Path: r.URL.Path, Auth: r.Header.Get("Authorization"),
-		UserAgent: r.Header.Get("User-Agent"), Query: r.URL.Query(), Body: body,
+		UserAgent: r.Header.Get("User-Agent"), AuditReason: r.Header.Get("X-Audit-Log-Reason"),
+		Query: r.URL.Query(), Body: body,
 	})
 }
 
@@ -152,6 +154,40 @@ func newFakeDiscord(t *testing.T) (*fakeDiscord, *client) {
 		}
 		io.WriteString(w, `[{"id":"9","name":"Test Server"}]`)
 	})
+	// Bans: user 403 outranks the bot, user 429 hits a rate limit, and bulk-ban
+	// reports user 456 as not banned.
+	mux.HandleFunc("GET /api/v10/guilds/9", jsonReply(`{"id":"9","name":"Test Server"}`))
+	mux.HandleFunc("PUT /api/v10/guilds/9/bans/{user}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("user") {
+		case "403":
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"message":"Missing Permissions","code":50013}`)
+		case "429":
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"message":"You are being rate limited.","retry_after":0.01,"global":false}`)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	mux.HandleFunc("DELETE /api/v10/guilds/9/bans/{user}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /api/v10/guilds/9/bulk-ban", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserIDs []string `json:"user_ids"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		var banned, failed []string
+		for _, id := range req.UserIDs {
+			if id == "456" {
+				failed = append(failed, id)
+			} else {
+				banned = append(banned, id)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string][]string{"banned_users": banned, "failed_users": failed})
+	})
+
 	mux.HandleFunc("GET /api/v10/channels/401", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		io.WriteString(w, `{"message":"401: Unauthorized","code":0}`)
@@ -185,7 +221,8 @@ func TestReadPrintsMessagesOldestFirst(t *testing.T) {
 	}
 	for _, want := range []string{
 		`thread "App crashes on start" (111), 2 messages, oldest first`,
-		"Bob (@bob) · msg 1002",
+		"Bob (@bob) · user 2 · msg 1002",
+		"alice · user 1 · msg 1001",
 		`reply to msg 1001 by alice: "it crashes"`,
 		"  thanks @alice!",
 		"attachment: ../../shot.png (image/png, 4 B, 10x20) -> " + f.server.URL + "/cdn/a.png?ex=1",
@@ -348,6 +385,16 @@ func TestInvalidInputSendsNothing(t *testing.T) {
 		{"read", "111", "--before", "1", "--after", "2"},
 		{"read", "111", "--limit", "501"},
 		{"posts", "abc"},
+		{"ban"},
+		{"ban", "@spammer"},
+		{"ban", "123", "--delete-hours", "169"},
+		{"ban", "123", "--delete-hours", "-1"},
+		{"ban", "123", "--reason", strings.Repeat("x", maxAuditReason+1)},
+		{"ban", "123", "--json"},
+		append([]string{"ban"}, manyIDs(maxBanUsers+1)...),
+		{"unban"},
+		{"unban", "123", "456"},
+		{"unban", "../123"},
 	}
 	for _, args := range cases {
 		if code, _, _ := runCLI(c, "", args...); code != 2 {
@@ -513,5 +560,124 @@ func TestSafeFilename(t *testing.T) {
 		if got := safeFilename(in); got != want {
 			t.Errorf("safeFilename(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func manyIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = strconv.Itoa(1000 + i)
+	}
+	return ids
+}
+
+func TestBanOneUserDeletesMessagesAndLogsReason(t *testing.T) {
+	f, c := newFakeDiscord(t)
+	code, out, errOut := runCLI(c, "", "ban", "123", "--delete-hours", "24", "--reason", "scam links: free nitro ✓")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if out != "banned user 123 from Test Server (9), deleting their messages from the last 24 hours\n" {
+		t.Errorf("unexpected output %q", out)
+	}
+	reqs := f.requestsTo("/api/v10/guilds/9/bans/123")
+	if len(reqs) != 1 || reqs[0].Method != http.MethodPut || reqs[0].Auth != "Bot "+testToken {
+		t.Fatalf("want one authorized PUT, got %+v", reqs)
+	}
+	if string(reqs[0].Body) != `{"delete_message_seconds":86400}` {
+		t.Errorf("unexpected body %s", reqs[0].Body)
+	}
+	if reqs[0].AuditReason != "scam%20links:%20free%20nitro%20%E2%9C%93" {
+		t.Errorf("audit reason not percent-encoded: %q", reqs[0].AuditReason)
+	}
+	if len(f.requestsTo("/api/v10/guilds/9/bulk-ban")) != 0 {
+		t.Error("a single ban used bulk-ban")
+	}
+}
+
+func TestBanWithoutCleanupKeepsMessages(t *testing.T) {
+	f, c := newFakeDiscord(t)
+	code, out, errOut := runCLI(c, "", "ban", "--server", "9", "123")
+	if code != 0 || out != "banned user 123 from Test Server (9)\n" {
+		t.Fatalf("exit %d, out %q, stderr %q", code, out, errOut)
+	}
+	reqs := f.requestsTo("/api/v10/guilds/9/bans/123")
+	if len(reqs) != 1 || string(reqs[0].Body) != `{"delete_message_seconds":0}` || reqs[0].AuditReason != "" {
+		t.Fatalf("unexpected ban request: %+v", reqs)
+	}
+}
+
+func TestBanSeveralUsersUsesBulkBan(t *testing.T) {
+	f, c := newFakeDiscord(t)
+	code, out, errOut := runCLI(c, "", "ban", "123", "456", "789", "123", "--delete-hours", "1")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 when a user was not banned", code)
+	}
+	if out != "banned 2 users from Test Server (9), deleting their messages from the last 1 hour: 123, 789\n" {
+		t.Errorf("unexpected output %q", out)
+	}
+	if !strings.Contains(errOut, "not banned: 456") {
+		t.Errorf("failed user not reported: %q", errOut)
+	}
+	reqs := f.requestsTo("/api/v10/guilds/9/bulk-ban")
+	if len(reqs) != 1 {
+		t.Fatalf("want one bulk-ban request, got %d", len(reqs))
+	}
+	var body struct {
+		UserIDs []string `json:"user_ids"`
+		Seconds int      `json:"delete_message_seconds"`
+	}
+	if err := json.Unmarshal(reqs[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(body.UserIDs, ",") != "123,456,789" || body.Seconds != 3600 {
+		t.Errorf("unexpected bulk-ban body %s", reqs[0].Body)
+	}
+	for _, r := range f.requests {
+		if r.Method == http.MethodPut {
+			t.Errorf("bulk ban also sent a single ban: %s", r.Path)
+		}
+	}
+}
+
+func TestBanExplainsMissingPermission(t *testing.T) {
+	_, c := newFakeDiscord(t)
+	code, _, errOut := runCLI(c, "", "ban", "403")
+	if code != 1 || !strings.Contains(errOut, "Missing Permissions") || !strings.Contains(errOut, "Ban Members") {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if strings.Contains(errOut, "channel") {
+		t.Errorf("ban error talks about channels: %q", errOut)
+	}
+}
+
+func TestBanNeverRetries(t *testing.T) {
+	f, c := newFakeDiscord(t)
+	code, _, errOut := runCLI(c, "", "ban", "429")
+	if code != 1 || !strings.Contains(errOut, "rate limited") {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if n := len(f.requestsTo("/api/v10/guilds/9/bans/429")); n != 1 {
+		t.Fatalf("ban sent %d times, want 1", n)
+	}
+}
+
+func TestUnban(t *testing.T) {
+	f, c := newFakeDiscord(t)
+	code, out, errOut := runCLI(c, "", "unban", "123", "--reason", "false positive")
+	if code != 0 || !strings.HasPrefix(out, "unbanned user 123 in Test Server (9)") {
+		t.Fatalf("exit %d, out %q, stderr %q", code, out, errOut)
+	}
+	reqs := f.requestsTo("/api/v10/guilds/9/bans/123")
+	if len(reqs) != 1 || reqs[0].Method != http.MethodDelete || reqs[0].AuditReason != "false%20positive" {
+		t.Fatalf("unexpected unban requests: %+v", reqs)
+	}
+}
+
+func TestWebhookMessagesShowNoUserID(t *testing.T) {
+	var out bytes.Buffer
+	printMessage(&out, message{ID: "5", WebhookID: "77", Author: user{ID: "77", Username: "GitHub", Bot: true}}, nil, nil)
+	if !strings.Contains(out.String(), "GitHub [bot] · via webhook · msg 5") || strings.Contains(out.String(), "user 77") {
+		t.Fatalf("got:\n%s", out.String())
 	}
 }

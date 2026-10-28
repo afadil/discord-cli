@@ -154,7 +154,15 @@ var systemMessages = map[int]string{
 }
 
 func printMessage(out io.Writer, m message, downloads, skipped map[string]string) {
-	header := fmt.Sprintf("[%s] %s · msg %s", formatTime(m.Timestamp), displayName(m.Author), m.ID)
+	// The author's user ID is what `discord ban` takes. A webhook's author ID
+	// is not a user, so it is not printed.
+	header := fmt.Sprintf("[%s] %s", formatTime(m.Timestamp), displayName(m.Author))
+	if m.WebhookID != "" {
+		header += " · via webhook"
+	} else if m.Author.ID != "" {
+		header += " · user " + m.Author.ID
+	}
+	header += " · msg " + m.ID
 	if m.EditedTimestamp != nil {
 		header += " (edited)"
 	}

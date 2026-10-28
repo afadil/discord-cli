@@ -1,6 +1,7 @@
 # discord-cli
 
-A small command-line tool for reading and posting Discord messages as a bot.
+A small command-line tool for reading and posting Discord messages as a bot,
+and for banning spammers.
 
 It only uses Discord's REST API and never opens a gateway connection, so it
 does not count toward the bot's 1000 logins (IDENTIFY) per day. Running it
@@ -24,6 +25,9 @@ promise of a response or a fix.
     Without it, message text and attachments come back empty.
   - Permissions **View Channels** and **Read Message History** for reading,
     plus **Send Messages** and **Send Messages in Threads** for `send`.
+  - **Ban Members** for `ban` and `unban`. Banning several users in one
+    command also needs **Manage Server**. The bot's highest role must be above
+    the highest role of anyone it bans (Server Settings → Roles, drag it up).
 
 ## Install
 
@@ -81,6 +85,8 @@ discord channels [--server ID]
 discord posts FORUM_ID [--limit N]
 discord read CHANNEL_ID [--limit N] [--before MSG_ID | --after MSG_ID] [--download]
 discord send CHANNEL_ID [--reply-to MSG_ID] [TEXT]
+discord ban USER_ID... [--server ID] [--delete-hours N] [--reason TEXT]
+discord unban USER_ID [--server ID] [--reason TEXT]
 ```
 
 Examples:
@@ -105,15 +111,25 @@ discord posts FORUM_ID
 discord send THREAD_ID --reply-to MSG_ID <<'EOF'
 Thanks for the report, this is fixed in the next release.
 EOF
+
+# Ban a spammer and delete everything they posted in the last 24 hours, in
+# every channel. `read` prints each author's user ID next to their name.
+discord ban USER_ID --delete-hours 24 --reason "scam links"
+
+# Ban several accounts from a raid in one request.
+discord ban USER_ID USER_ID USER_ID --delete-hours 1 --reason "raid"
+
+# Undo a ban. Messages the ban deleted are not restored.
+discord unban USER_ID
 ```
 
 You can also copy IDs from the Discord app: turn on Developer Mode (Settings →
-Advanced), then right-click a channel, thread or message → Copy ID.
+Advanced), then right-click a channel, thread, message or user → Copy ID.
 
 Behavior worth knowing:
 
-- `--json` prints the raw Discord response instead of text. It can't be
-  combined with `--download`.
+- `--json` prints the raw Discord response instead of text, for the read
+  commands. It can't be combined with `--download`.
 - Flags may come before or after IDs. Everything after `--` is text, so
   `discord send ID -- -5% today` works; stdin is simpler for longer messages.
 - `read --download` saves attachments up to 25 MB into a new temp folder.
@@ -122,11 +138,25 @@ Behavior worth knowing:
 - Reads wait out short rate limits (up to 10 s).
 - `send` disables all mentions, so it never pings anyone, and it never retries.
   Discord caps a message at 2000 characters.
+- `ban` with one user ID bans that user; with several (up to 200) it uses
+  Discord's bulk ban and prints who was banned, then exits with an error
+  naming anyone it could not ban. It works on users who already left the
+  server, and it never retries.
+- `--delete-hours` deletes up to 7 days (168 hours) of the user's messages
+  across the server. Without it, their messages stay. Deleted messages can't be
+  brought back, even by `unban`.
+- `--reason` shows next to the ban in Server Settings → Audit Log.
+- `ban` and `unban` act on the bot's only server, or on `--server ID` when the
+  bot is in several.
+- The CLI never watches the server live, so it can't stop spam as it is
+  posted. For that, turn on Discord's AutoMod (Server Settings → Safety
+  Setup). Use `ban` to clean up after it, or from an agent that checks
+  channels now and then.
 
 ## Agent skill
 
 `skill/SKILL.md` tells coding agents how to use the CLI and to ask before every
-`send`. Install it for Claude Code and opencode (both read `~/.claude/skills`)
+`send`, `ban` and `unban`. Install it for Claude Code and opencode (both read `~/.claude/skills`)
 and for Codex:
 
 ```bash
@@ -142,7 +172,8 @@ sandbox. Per agent:
 
 - **Codex** sandboxes commands, which blocks both. Allow the read commands to
   run outside the sandbox by adding these to `~/.codex/rules/default.rules`,
-  then restart Codex. `send` has no rule, so Codex asks every time.
+  then restart Codex. `send`, `ban` and `unban` have no rule, so Codex asks
+  every time.
 
   ```text
   prefix_rule(pattern=["discord", "servers"], decision="allow")
@@ -152,14 +183,19 @@ sandbox. Per agent:
   ```
 
 - **opencode** runs commands unsandboxed and without asking by default. Make
-  `send` ask in `~/.config/opencode/opencode.json`, then restart opencode:
+  `send`, `ban` and `unban` ask in `~/.config/opencode/opencode.json`, then
+  restart opencode:
 
   ```json
-  "permission": { "bash": { "*": "allow", "*discord send*": "ask" } }
+  "permission": { "bash": { "*": "allow", "*discord send*": "ask", "*discord ban*": "ask", "*discord unban*": "ask" } }
   ```
 
-- **Claude Code**: to make `send` always ask, add `"Bash(discord send:*)"` to
-  `permissions.ask` in `~/.claude/settings.json`.
+- **Claude Code**: to make `send`, `ban` and `unban` always ask, add these to
+  `permissions.ask` in `~/.claude/settings.json`:
+
+  ```json
+  "Bash(discord send:*)", "Bash(discord ban:*)", "Bash(discord unban:*)"
+  ```
 
 ## Test
 

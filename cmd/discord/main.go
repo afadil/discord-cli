@@ -1,6 +1,6 @@
-// Command discord reads and posts Discord messages as a bot through the REST
-// API. It never opens a gateway connection, so running it any number of times
-// does not count toward the bot's daily login (IDENTIFY) limit.
+// Command discord reads and posts Discord messages, and bans users, as a bot
+// through the REST API. It never opens a gateway connection, so running it any
+// number of times does not count toward the bot's daily login (IDENTIFY) limit.
 package main
 
 import (
@@ -25,9 +25,13 @@ const (
 	maxMessageLength = 2000
 	maxReadLimit     = 500
 	maxDownloadBytes = 25 << 20
+
+	maxBanUsers       = 200 // Discord's bulk-ban limit per request
+	maxBanDeleteHours = 168 // Discord deletes at most 7 days of a banned user's messages
+	maxAuditReason    = 512
 )
 
-const usage = `discord: read and post Discord messages as the bot (REST only, no gateway).
+const usage = `discord: read and post Discord messages, and ban users, as the bot (REST only, no gateway).
 
 Usage:
   discord servers                                 servers the bot is in
@@ -40,12 +44,21 @@ Usage:
   discord send CHANNEL_ID [--reply-to MSG_ID] [TEXT]
                                                   post TEXT, or stdin when TEXT is
                                                   omitted; never pings anyone
+  discord ban USER_ID... [--server ID] [--delete-hours N] [--reason TEXT]
+                                                  ban up to 200 users; --delete-hours
+                                                  also deletes their messages from
+                                                  the last N hours (max 168) in
+                                                  every channel
+  discord unban USER_ID [--server ID] [--reason TEXT]
+                                                  lift a ban (deleted messages are
+                                                  not restored)
 
   discord version                                 print the version
 
 Flags:
-  --json        print the raw Discord JSON instead of text
+  --json        print the raw Discord JSON instead of text (read commands only)
   --download    save attachments to a new temp folder and print their paths
+  --reason      note shown next to a ban or unban in the server's audit log
 
 The bot token comes from DISCORD_TOKEN, or on macOS from the Keychain first
 (service "discord-cli", account "bot-token"). Store it there with:
@@ -98,6 +111,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, c *client) in
 		"posts":    cmdPosts,
 		"read":     cmdRead,
 		"send":     cmdSend,
+		"ban":      cmdBan,
+		"unban":    cmdUnban,
 	}
 	fn, ok := commands[cmd]
 	if !ok {
@@ -530,4 +545,131 @@ func cmdSend(c *client, args []string, stdin io.Reader, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "sent message %s to channel %s\n", sent.ID, id)
 	return nil
+}
+
+// cmdBan bans one user with PUT /bans, or several at once with bulk-ban,
+// which also needs the Manage Server permission. Like send, it never retries.
+func cmdBan(c *client, args []string, _ io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("ban", flag.ContinueOnError)
+	server := fs.String("server", "", "")
+	deleteHours := fs.Int("delete-hours", 0, "")
+	reason := fs.String("reason", "", "")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 {
+		return usageError("usage: discord ban USER_ID... [--server ID] [--delete-hours N] [--reason TEXT]")
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, id := range pos {
+		if err := requireID("USER_ID", id); err != nil {
+			return err
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) > maxBanUsers {
+		return usageError(fmt.Sprintf("Discord bans at most %d users at once, got %d", maxBanUsers, len(ids)))
+	}
+	if *deleteHours < 0 || *deleteHours > maxBanDeleteHours {
+		return usageError(fmt.Sprintf("--delete-hours must be between 0 and %d (7 days)", maxBanDeleteHours))
+	}
+	if err := checkReason(*reason); err != nil {
+		return err
+	}
+	g, err := resolveGuild(c, *server)
+	if err != nil {
+		return err
+	}
+
+	cleanup := ""
+	if *deleteHours > 0 {
+		cleanup = fmt.Sprintf(", deleting their messages from the last %s", plural(*deleteHours, "hour"))
+	}
+	body := map[string]any{"delete_message_seconds": *deleteHours * 3600}
+	if len(ids) == 1 {
+		_, err := c.callWithReason(http.MethodPut, "/guilds/"+g.ID+"/bans/"+ids[0], nil, body, *reason)
+		if err != nil {
+			return refusedError(err, "The bot needs the Ban Members permission, and its highest role must be above the user's.")
+		}
+		fmt.Fprintf(out, "banned user %s from %s (%s)%s\n", ids[0], g.Name, g.ID, cleanup)
+		return nil
+	}
+
+	body["user_ids"] = ids
+	raw, err := c.callWithReason(http.MethodPost, "/guilds/"+g.ID+"/bulk-ban", nil, body, *reason)
+	if err != nil {
+		return refusedError(err, "Banning several users at once needs both the Ban Members and Manage Server permissions, and the bot's highest role must be above each user's.")
+	}
+	var result struct {
+		Banned []string `json:"banned_users"`
+		Failed []string `json:"failed_users"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return err
+	}
+	if len(result.Banned) > 0 {
+		fmt.Fprintf(out, "banned %s from %s (%s)%s: %s\n", plural(len(result.Banned), "user"), g.Name, g.ID, cleanup, strings.Join(result.Banned, ", "))
+	}
+	if len(result.Failed) > 0 {
+		return fmt.Errorf("not banned: %s (already banned, or the bot can't ban them)", strings.Join(result.Failed, ", "))
+	}
+	return nil
+}
+
+func cmdUnban(c *client, args []string, _ io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("unban", flag.ContinueOnError)
+	server := fs.String("server", "", "")
+	reason := fs.String("reason", "", "")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return usageError("usage: discord unban USER_ID [--server ID] [--reason TEXT]")
+	}
+	id := pos[0]
+	if err := requireID("USER_ID", id); err != nil {
+		return err
+	}
+	if err := checkReason(*reason); err != nil {
+		return err
+	}
+	g, err := resolveGuild(c, *server)
+	if err != nil {
+		return err
+	}
+	if _, err := c.callWithReason(http.MethodDelete, "/guilds/"+g.ID+"/bans/"+id, nil, nil, *reason); err != nil {
+		return refusedError(err, "The bot needs the Ban Members permission.")
+	}
+	fmt.Fprintf(out, "unbanned user %s in %s (%s); messages deleted by the ban stay deleted\n", id, g.Name, g.ID)
+	return nil
+}
+
+func checkReason(reason string) error {
+	if n := utf8.RuneCountInString(reason); n > maxAuditReason {
+		return usageError(fmt.Sprintf("--reason is %d characters; Discord allows %d", n, maxAuditReason))
+	}
+	return nil
+}
+
+// refusedError replaces the generic 403 text, which is about channel access,
+// with what a ban or unban needs.
+func refusedError(err error, hint string) error {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+		return fmt.Errorf("Discord refused (403, code %d): %s. %s", apiErr.Code, apiErr.Message, hint)
+	}
+	return err
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }

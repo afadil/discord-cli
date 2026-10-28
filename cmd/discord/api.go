@@ -108,6 +108,12 @@ func (e *apiError) Error() string {
 // call sends one REST request and returns the raw response body. It never
 // retries, so a write is sent at most once.
 func (c *client) call(method, path string, query url.Values, body any) ([]byte, error) {
+	return c.callWithReason(method, path, query, body, "")
+}
+
+// callWithReason is call plus an audit log reason, which moderators see next
+// to the action in Server Settings → Audit Log.
+func (c *client) callWithReason(method, path string, query url.Values, body any, reason string) ([]byte, error) {
 	u := c.base + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -128,6 +134,11 @@ func (c *client) call(method, path string, query url.Values, body any) ([]byte, 
 	req.Header.Set("User-Agent", userAgent())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if reason != "" {
+		// Discord expects the reason percent-encoded, which also keeps
+		// newlines and non-ASCII text out of the raw header.
+		req.Header.Set("X-Audit-Log-Reason", url.PathEscape(reason))
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -314,6 +325,7 @@ type message struct {
 	ID                string       `json:"id"`
 	Type              int          `json:"type"`
 	ChannelID         string       `json:"channel_id"`
+	WebhookID         string       `json:"webhook_id"`
 	Author            user         `json:"author"`
 	Content           string       `json:"content"`
 	Timestamp         time.Time    `json:"timestamp"`
